@@ -1,0 +1,10 @@
+/boot
+/etc
+/opt
+/usr
+/var/cache
+/var/games
+/var/lib
+/var/local
+/var/log
+/var/opt

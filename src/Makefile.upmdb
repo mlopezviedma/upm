@@ -1,0 +1,14 @@
+ifndef PREFIX
+  PREFIX = /usr
+endif
+
+install: src/upmdb src/upmdb.1.gz
+	install -Dv -m 755 src/upmdb ${PREFIX}/bin/upmdb
+	install -Dv -m 644 src/upmdb_functions ${PREFIX}/lib/upm/upmdb_functions
+#	install -Dv -m 644 --backup --suffix=numbered src/mirrorlist /etc/upm/mirrorlist
+	install -Dv -m 644 src/etc/mirrorlist /etc/upm/mirrorlist.example
+	test -f /etc/upm/mirrorlist || install -Dv -m 644 src/etc/mirrorlist /etc/upm/mirrorlist
+	install -Dv -m 644 src/upmdb.1.gz ${PREFIX}/share/man/man1/upmdb.1.gz
+	test -d /var/lib/upm/db || install -dv -m 755 /var/lib/upm/db
+	test -d /var/lib/upm/repos/local || install -dv -m 755 /var/lib/upm/repos/local
+	touch /var/lib/upm/repos/local/.directory

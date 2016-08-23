@@ -1,0 +1,536 @@
+#!/bin/bash
+
+MIRRORLIST=/etc/upm/mirrorlist
+DBDIR=/var/lib/upm/db
+DOWNLOAD_COMMAND="${DOWNLOAD_COMMAND:-wget --no-verbose --no-check-certificate}"
+BUILD_OPTIONS=${BUILD_OPTIONS:--ducmi}
+workdir=$(mktemp --dry-run --directory /tmp/upmdb-XXXXXXXX)
+
+function show_usage () {
+	cat <<!
+Usage: upmdb OPTIONS [ARGS]
+       upmdb -h|--help
+!
+}
+
+function show_help () {
+	show_usage
+	cat <<!
+
++++ THIS HELP TEXT NEEDS FIXING +++
+
+Command line options:
+  -D,--download PACKAGE1 [PACKAGE2 ...]
+	Download the package from the mirrors
+  -S, --sync PACKAGE1 [PACKAGE2 ...]
+	Download and sync the package (must be done as root)
+  -I, --install PACKAGE1 [PACKAGE2 ...]
+	Download, sync and install the package (must be done as root)
+  -U, --updatedb
+	Update mirrors file database (must be done as root)
+  -m, --makepkg NAME -a FILE1 ... [ -d FILE2 ... ]
+	Create a package file named NAME.pkg.tar.gz containing files
+	FILE1 ... , discarding FILE2 ...
+  -M, --makebasepkg NAME [ -a FILE1 ... -d FILE2 ... ]
+   Create a package file named NAME.pkg.tar.gz containing
+	files build.conf, .project and .plan,	if they exist, from the
+	UP home, plus FILE1 ... , discarding FILE2 ... .
+  
+Query options:
+  -Q [REGEXP]
+  -Ql [REGEXP]
+	List all the packages that match REGEXP.
+  -Qm [REGEXP]
+  	List all active mirrors.
+  -Qlm [MIRROR] [REGEXP]
+  	List the packages in mirror MIRROR that match REGEXP. If
+	MIRROR is '-' or not given, search in all mirrors.
+  -Qi PACKAGE
+  	Inspect the package PACKAGE from the mirrors.
+  -Qii PACKAGE [FILE1 FILE2 ...]
+  	Detailed inspection of the package PACKAGE from the mirrors. Shows
+	the contents of.project, .plan, build.conf and README.fixes, if
+	they exist, plus FILE1 FILE2 ...
+  -s, --script SCRIPT
+	Use custom SCRIPT to show the inspected info (works before -Qid
+	and -Qfd). The script is run in the directory containing the
+	decompressed package and with the .pkginfo file sourced.
+
+  -h, --help
+   Show this help
+!
+}
+
+function clean_exit () {
+	[ -d $workdir ] && rm -r $workdir
+	exit ${RETVAL:-1}
+}
+
+function exit_usage () {
+	show_usage >&2
+	clean_exit
+}
+
+function exit_help () {
+	show_help >&2
+	clean_exit
+}
+
+function msg () {
+	echo " -> $@" >&2
+}
+
+function errmsg () {
+	echo "upmdb: $@" >&2
+}
+
+function exit_errmsg () {
+	errmsg "$@"
+	clean_exit
+}
+
+function exit_noargs () {
+	exit_errmsg "Not enough arguments; see $(basename $0) -h"
+}
+
+function exit_notfound () {
+	exit_errmsg "$1: not found"
+}
+
+function exit_noroot () {
+	exit_errmsg "Only root can do that"
+}
+
+function exit_root () {
+	exit_errmsg "You cannot do this as root"
+}
+
+function exit_noup () {
+	exit_errmsg "You are not a package user"
+}
+
+function checkroot () {
+	[[ $UID == "0" ]] || return 1
+	return 0
+}
+
+function checkup () {
+	local grp
+	local me=$(whoami)
+	for grp in $(id -Gn $me 2>/dev/null)
+	do
+		case $grp in install) return 0;; esac
+	done
+	return 1
+}
+
+function ask_for_confirmation () {
+	declare default=y
+	declare string='(Y/n)'
+	declare ans
+	while :;	do case $1 in
+		-y) default='y'; string='(Y/n)';	shift;;
+		-n) default='n'; string='(y/N)'; shift;;
+		*)  break;;
+	esac; done
+	read -n1 -p "$@ $string " ans; echo
+	case $ans in
+		y|n) : ;;
+		*) ans=$default ;;
+	esac
+	if [[ $ans == 'n' ]]
+	then
+		msg "Aborting..."
+		clean_exit
+	fi
+}
+
+function get_mirrors () {
+	declare line
+	cat $MIRRORLIST \
+		| grep -v '^#' \
+		| grep -v '^$' \
+		| while read line
+	do
+		echo $line
+	done
+}
+
+function is_pkg_in_mirrors () {
+	[ $1 ] || return 1
+	cat $DBDIR/* 2>/dev/null \
+		| grep "^$1.pkg.tar.gz" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+function list_active_mirrors () {
+	cat $MIRRORLIST \
+		| grep -v '^#' \
+		| grep -v '^$' \
+		| cut -d' ' -f1 \
+		| sort
+}
+
+function list_mirrors_in_database () {
+	ls $DBDIR/ \
+		| sort
+}
+
+function check_db_vs_mirrors () {
+	declare buf1=/tmp/.upmdb.buf1
+	declare buf2=/tmp/.upmdb.buf2
+	declare retval=0
+	list_active_mirrors >$buf1
+	list_mirrors_in_database >$buf2
+	diff -q $buf1 $buf2 >/dev/null 2>&1 || retval=1
+	rm $buf1 $buf2
+	return $retval
+}
+
+function strip_suffix () {
+	cat - \
+		| sed -e 's/.pkg.tar.gz$//'
+}
+
+search_for_package_in_mirrors()
+{
+	declare line
+	get_mirrors \
+		| while read line
+		do
+			_mirrorname=$(echo $line | cut -d' ' -f1)
+			_mirrorlocation=$(echo $line | cut -d' ' -f2)
+			_mirrordbfile=$DBDIR/$_mirrorname
+			if grep "^${1}.pkg.tar.gz" $_mirrordbfile >/dev/null 2>&1
+			then
+				echo $_mirrorlocation/${1}.pkg.tar.gz
+				break
+			fi
+		done
+}
+
+function retrieve_package () {
+	case $1 in
+		/*)
+			cp $1 . \
+				|| clean_exit
+		;;
+		*)
+			declare _pkglocation=$(search_for_package_in_mirrors $1)
+			$DOWNLOAD_COMMAND $_pkglocation \
+				|| clean_exit
+		;;
+	esac
+}
+
+function enter_clean_workdir () {
+	mkdir -p $workdir/
+	rm -r $workdir/* 2>/dev/null
+	cd $workdir
+	case $1 in
+		-)
+			true
+		;;
+		*)
+			retrieve_package $1 &&
+				tar xf *.pkg.tar.gz &&
+				. .pkginfo
+		;;
+	esac
+}
+
+function query_mirrors () {
+	if [ $1 ]
+	then
+		list_mirrors_in_database | grep -- "$1"
+	else
+		if check_db_vs_mirrors
+		then
+			list_mirrors_in_database
+		else
+			echo "Active mirrors and database differ."
+			echo "You can run upac -U or fix the mirrorlist to avoid this message."
+			echo "Active mirrors:"
+			list_active_mirrors | sed -e 's/^/  /'
+			echo "Mirrors in database:"
+			list_mirrors_in_database | sed -e 's/^/  /'
+		fi
+	fi
+}
+
+function query_packages () {
+	if [ $1 ]
+	then
+		cat $DBDIR/* 2>/dev/null \
+			| grep -- "$1" \
+			| sort -V \
+			| uniq \
+			| strip_suffix
+	else
+		cat $DBDIR/* 2>/dev/null \
+			| sort -V \
+			| uniq \
+			| strip_suffix
+	fi
+}
+
+function query_packages_in_mirror () {
+	declare mirror=${1:--}
+	declare m
+
+	case $mirror in
+		'-')
+			if [ $2 ]
+			then
+				for m in $(list_mirrors_in_database)
+				do
+					cat $DBDIR/$m \
+						| grep -- "$2" \
+						| sort -V \
+						| sed -e "s/^/$m /" \
+						| strip_suffix
+				done
+			else
+				for m in $(list_mirrors_in_database)
+				do
+					cat $DBDIR/$m \
+						| sort -V \
+						| sed -e "s/^/$m /" \
+						| strip_suffix
+				done
+			fi
+		;;
+		*)
+			if [ -f $DBDIR/$mirror ]
+			then
+				if [ $2 ]
+				then
+					cat $DBDIR/$mirror \
+						| grep -- "$2" \
+						| sort -V \
+						| strip_suffix
+				else
+					cat $DBDIR/$mirror \
+						| sort -V \
+						| strip_suffix
+				fi
+			else
+				echo "$mirror: no database matches"
+			fi
+		;;
+	esac
+}
+
+function show_package_info () {
+	cat <<!
+Package user name: $PKGNAME
+Groups: ${PKGGROUPS//,/, }
+Description: ${PKGDESC:-(no description available)}
+!
+}
+
+function show_package_contents () {
+	echo "Contents:"
+	find pkg/ -mindepth 1 \
+		| sort \
+		| sed -e 's|^|  |; s|pkg/||'
+}
+
+header()
+{
+	echo
+	echo    "  $@"
+	echo -n "  "
+	echo "$@" | tr '[:print:]' '-'
+	echo
+}
+
+function inspect_package () {
+	declare f
+	for f in .project .plan
+	do
+		if [ -f pkg/$f ]
+		then
+			header $f
+			cat pkg/$f | grep -v '^#'
+		fi
+	done
+	for f in build.conf README.fixes
+	do
+		if [ -f pkg/$f ]
+		then
+			header $f
+			cat pkg/$f
+		fi
+	done
+	for f in $PKGFILES
+	do
+		if [ -f pkg/$f ]
+		then
+			header $f
+			cat pkg/$f
+		else
+			msg "$f not found, skipping"
+		fi
+	done
+	for f in $target_files
+	do
+		if [ -f pkg/$f ]
+		then
+			header $f
+			cat pkg/$f
+		else
+			msg "$f not found, skipping"
+		fi
+	done
+}
+
+function update_package_database () {
+	declare line _mirrorname _mirrorlocation
+	echo -n >buf
+	mkdir db/
+	get_mirrors \
+		| while read line
+	do
+		_mirrorname=$(echo $line | cut -d' ' -f1)
+		_mirrorlocation=$(echo $line | cut -d' ' -f2)
+		case $_mirrorlocation in
+			http*)
+				msg "Processing mirror $_mirrorname"
+				$DOWNLOAD_COMMAND ${_mirrorlocation}/.directory || clean_exit
+				cat .directory >>buf
+				rm .directory 2>/dev/null
+			;;
+			/*)
+				msg "Processing local mirror $_mirrorname"
+				[ -f ${_mirrorlocation}/.directory ] || exit_notfound $1/.directory
+				cat ${_mirrorlocation}/.directory >>buf
+			;;
+		esac
+		cat buf >db/$_mirrorname
+		echo -n >buf
+	done
+	msg "Updating database files"
+	rm $DBDIR/* 2>/dev/null
+	cp db/* $DBDIR
+}
+
+function ask_for_edit_pkginfo () {
+	declare ans newpkgname newpkggroups newpkgdesc
+	while true
+	do
+		. .pkginfo || clean_exit
+		echo
+		read -p "Type 'e' to edit package info, 'a' to abort, anything else to continue" -n1 ans
+		echo
+		case $ans in
+			a)
+				msg "Aborting..."
+				clean_exit
+			;;
+			e)
+				echo
+				read -e -p "Package name: " -i "$PKGNAME" newpkgname
+				read -e -p "Package groups: " -i "$PKGGROUPS" newpkggroups
+				read -e -p "Package description: " -i "$PKGDESC" newpkgdesc
+				cat >.pkginfo<<!
+PKGNAME="$newpkgname"
+PKGGROUPS="$newpkggroups"
+PKGDESC="$newpkgdesc"
+!
+			show_package_info
+			;;
+			*)
+				break
+			;;
+		esac
+	done
+}
+
+function sync_package () {
+	PKGMAINGROUP=$(echo $PKGGROUPS | cut -d',' -f1)
+	if [ -d ${HOMEDIR}/$PKGNAME ]
+	then
+		ask_for_confirmation -n "Package already exists, do you want to overwrite it? "
+	else
+		ask_for_confirmation -y "Package does not exist, create it? "
+		yes y | upm --create $PKGNAME $PKGGROUPS "$PKGDESC" || clean_exit
+	fi
+	
+	msg "Changing ownership in temporary location"
+	chown -Rhv ${PKGNAME}:${PKGMAINGROUP} pkg/
+	msg "Merging contents as user $PKGNAME"
+	su -c "find pkg/ -mindepth 1 -exec cp -rv '{}' ${HOMEDIR}/$PKGNAME/ ';'" $PKGNAME || clean_exit
+}
+
+function install_package () {
+#	declare install_script=$(mktemp /tmp/upmdb.installscript-XXXXXXXX)
+#	chmod a+x $install_script
+	msg "Running build.sh as user $PKGNAME"
+#	cat >$install_script<<!
+##!/bin/bash
+#cd
+#~/build.sh -ducmi
+#!
+#	su -c "$install_script" $PKGNAME || clean_exit
+	upm $PKGNAME ~/build.sh $BUILD_OPTIONS || clean_exit
+#	rm $install_script
+}
+
+function make_package () {
+	myname=$(whoami)
+	mygroups="$(echo $(groups | sed -e 's/ /\n/g' | grep -v '^install$') | tr ' ' ',')"
+	mydesc="$(upm -i $myname \
+				| grep 'Package Description' \
+				| sed -e 's/Package Description:  //')"
+	pkgdir=${workdir}/pkg
+	mkdir -p $pkgdir
+	_name=$1
+	_pkgoutfile=$_name.pkg.tar
+	_action=add
+	shift
+
+	while [ $1 ]
+	do case $1 in
+		-a) _action=add; shift;;
+		-d) _action=discard; shift;;
+		*)
+			case $_action in
+				add)
+					cp -rv --parents $1 $pkgdir 2>/dev/null ||
+						msg "Can't find $1, skipping"
+				;;
+				discard)
+					rm -rv $pkgdir/$1 2>/dev/null ||
+						msg "Can't discard $1, skipping"
+				;;
+			esac
+			shift
+		;;
+	esac
+	done
+
+	msg "Generating .pkginfo"
+	cat >${workdir}/.pkginfo<<!
+PKGNAME="$myname"
+PKGGROUPS="$mygroups"
+PKGDESC="$mydesc"
+!
+	msg "Compressing package"
+	
+	(
+		_CWD=$(pwd)
+		cd $workdir &&
+		tar cf $_pkgoutfile pkg/ .pkginfo &&
+		msg "gzipping $_pkgoutfile"
+		ls $_pkgoutfile
+		gzip $_pkgoutfile &&
+		cp $_pkgoutfile.gz $_CWD &&
+		cd $_CWD
+	)
+
+	if [ -f $_pkgoutfile.gz ]
+	then msg "Done."
+	else msg "Failed!"
+	fi
+}

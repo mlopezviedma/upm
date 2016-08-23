@@ -1,0 +1,239 @@
+# User Package Manager action functions
+
+[ -n "$action_functions" ] && return 0
+
+PREFIX=${PREFIX:-/usr}
+HOMEDIR=${HOMEDIR:-/var/pkg}
+LIBEXECDIR=${LIBEXECDIR:-$PREFIX/libexec/upm}
+SYSCONFIGDIR=${SYSCONFIGDIR:-/etc}
+GROUPSCHEME=${GROUPSCHEME:-install}
+installdirs="${installdirs:-/boot /etc /opt /usr}"
+
+if [ -z "$UPMLOGFILE" ]; then
+	is_package_user $(whoami) && \
+		logfile=/var/log/pkg/$(whoami).log || logfile=/var/log/upm.log
+else
+	logfile=$UPMLOGFILE
+fi
+
+source $PREFIX/lib/upm/message_functions
+source $PREFIX/lib/upm/check_functions
+source $PREFIX/lib/upm/query_functions
+
+function only_first () {
+	echo $1
+}
+
+function all_but_first () {
+	shift
+	echo $@
+}
+
+function create_package_user () {
+	local grp
+	local grps="$(echo $2 | tr ',' ' ')"
+	for grp in $grps; do
+		add_group_if_new $grp
+	done
+	echo "A new package user will be created as follows:" >&2
+	echo -e "  Package name: $1\n  Package categories: $2\n  Description: $3" >&2
+	ask_confirmation
+	local useraddopt="-md $HOMEDIR/$1 -k /etc/upm/skel -s /bin/bash"
+	case $GROUPSCHEME in
+		category)
+			local primary_group=$(only_first $grps)
+			grps=$(all_but_first $grps | tr ' ' ',')
+			[ -n "$grps" ] && grps=install,$grps || grps=install
+			useradd $useraddopt -Ng $primary_group -G $grps -c "$3" $1;;
+		install) useradd $useraddopt -Ng install -G $2 -c "$3" $1;;
+		packagename) useradd $useraddopt -Ng $1 -G install,$2 -c "$3" $1;;
+	esac
+	chmod 700 $HOMEDIR/$1
+	log "Package user '${1}' created. Categories: ${2}. Description: '${3}'."
+	return 0
+}
+
+function add_package_to_category () {
+	checkroot
+	[ $# == 0 ] && exiterr "A package must be specified."
+	[ $# == 1 ] && exiterr "A package category must be specified."
+	[ $# != 2 ] && exiterr "Too many arguments."
+	checkpkguser $1 || exiterr "$1 is not a valid package user."
+	args="$(echo $2 | tr ',' ' ')"
+	for grp in $args; do
+		if [ -n "$grp" ]; then
+			add_group_if_new $grp
+			gpasswd --add $1 $grp | logcmd
+		fi
+	done
+}
+
+function add_group_if_new () {
+	if [ -z "$(grep ^$1: /etc/group)" ]; then
+		echo -n "Non existing group '$1' will be created. " >&2
+		ask_confirmation
+		groupadd $1
+		log "New package category created: ${1}."
+	fi
+	return 0
+}
+
+function fix_special_files () {
+	checkroot
+	[ $# == 0 ] || [ $# == 1 ] || [ $# == 2 ] && \
+		exiterr "You must specify owner, mode and at least one file."
+	local hooksdir owner mode file file_owner file_group file_name file_real_path
+	hooksdir=/etc/upm/hooks
+	owner=$1
+	mode=$2
+	shift 2
+	for file in $@; do
+		if ! [ -f $file ]; then
+			warning "$file is not a regular file. Skipping."
+			continue
+		fi
+		file_owner=$(find $file -printf "%u")
+		file_group=$(find $file -printf "%g")
+		file_name=$(find $file -printf "%f")
+		if [ -z "$(grep ^$file_owner: /etc/passwd)" ] || \
+			! [ -d $HOMEDIR/$file_owner ]; then
+				warning "$file is not owned by a package user. Skipping."
+				continue
+		fi
+		[ -a $LIBEXECDIR/$file_name ] && \
+			warning "$LIBEXECDIR/$file_name already exists. Skipping." &&
+			continue
+		file_real_path="$(readlink -f $file)"
+		log "### Fixing file ${file} for package ${file_owner}..."
+		chown -c $owner $file | logcmd
+		chmod -c $mode $file | logcmd
+		mv -vi $file $LIBEXECDIR/$file_name | logcmd
+		ln -sv $LIBEXECDIR/$file_name $file_real_path | logcmd
+		chown -hv $file_owner:$file_group $file_real_path | logcmd
+		log "### File ${file} fixed for package ${file_owner}."
+		[ -f $hooksdir/fix.hook ] && source $hooksdir/fix.hook $file_real_path
+	done
+}
+
+function generate_package () {
+	checkpkguser
+	pkg=$(whoami)
+	if [ $# == 0 ]; then
+		warning "No filename specified. using $HOME/${pkg}"
+		file="$HOME/${pkg}"
+	elif [ $# == 1 ]; then file="$1"
+	else exiterr "Too many arguments."
+	fi
+	[ -a "${file}.pkg.tar" ] && exiterr "${file}.pkg.tar already exists."
+	[ -a "${file}.pkg.tar.xz" ] && exiterr "${file}.pkg.tar.xz already exists."
+	touch "${file}.pkg.tar"
+	get_files_from $pkg | while read; do
+		tar --exclude=/var/log/* -vrpf "${file}.pkg.tar" $REPLY 2>/dev/null
+		[ -L "$REPLY" ] && case $(readlink $REPLY) in $LIBEXECDIR/*)
+			tar -vrpf "${file}.pkg.tar" $(readlink $REPLY) 2>/dev/null;;
+		esac
+	done
+	xz -v ${file}.pkg.tar && echo "Package generated: ${file}.pkg.tar.xz" >&2
+}
+
+function install_package () {
+	checkpkguser
+	pkg=$(whoami)
+	if [ $# == 0 ]; then
+		warning "No filename specified. using $HOME/${pkg}.pkg.tar.xz"
+		file="$HOME/${pkg}.pkg.tar.xz"
+	elif [ $# == 1 ]; then file="$1"
+	else exiterr "Too many arguments."
+	fi
+	[ -f "$file" ] || exiterr "$file does not exist or is not a regular file."
+	xz --keep --decompress --stdout "$file" | tar -xv --one-top-level=/
+}
+
+function generate_uninstall_script () {
+	checkpkguser
+	local suffix dir
+	local pkg=$(whoami)
+	local i=0
+	local file="$HOME/uninstall.sh"
+	local specials=$(mktemp -p ~)
+	while [ -f "$file" ]; do
+		suffix=".$i"
+		let i++
+		file="$HOME/uninstall${suffix}.sh"
+	done
+	get_files_from $pkg | sort | while read; do
+		[ -d "$REPLY" ] || echo "rm -vf $REPLY"
+		[ -L "$REPLY" ] && case $(readlink $REPLY) in $LIBEXECDIR/*)
+			echo "echo Warning: $(readlink $REPLY) must also be removed." \
+				>> $specials;;
+		esac
+	done > $file
+	echo "chmod u-s ~" >> $file &&
+	cat $specials >> $file &&
+	chmod u+x $file &&
+	echo "Uninstall script generated: $file" >&2
+	rm -f $specials
+}
+
+function make_install_dirs () {
+	[ -n "$INSTALLDIRSADMIN" ] && checkroot
+	[ $UID == 0 ] || checkpkguser
+	[ $# == 0 ] && exiterr "Missing arguments."
+	mkdir -v "$@" 2>/dev/null
+	chown -c $INSTALLDIRSADMIN:install "$@" && \
+	chmod -c g+w,o+t "$@" && \
+	return 0 || return 1
+}
+
+function refresh_install_dirs () {
+	[ -n "$INSTALLDIRSADMIN" ] && checkroot
+	[ $# != 0 ] && exiterr "Too many arguments."
+	[ $UID == 0 ] || checkpkguser
+	local pkg dir dirs
+	if [ $UID == 0 ]; then
+		echo -n "Every package user's directory will become an install directory. " >&2
+		ask_confirmation
+		dirs=$(\
+			for pkg in $(get_all_packages); do
+				for dir in $installdirs; do
+					find $dir -user $pkg -type d -printf "%p " 2>/dev/null;
+				done;
+			done)
+	else
+		dirs=$(for dir in $installdirs; do
+			find $dir -type d -user $(whoami) -printf "%p " 2>/dev/null
+		done)
+	fi
+	[ -n "$dirs" ] && make_install_dirs $dirs
+}
+
+function log_request () {
+	[ $# != 0 ] && log "$*" || logcmd
+}
+
+function log () {
+	echo "$(date "+[%F %R]") $*" >> $logfile
+}
+
+function logcmd () {
+	while read; do
+		echo "$(date "+[%F %R]") $REPLY" >> $logfile
+		echo "$REPLY"
+	done
+}
+
+function ask_confirmation () {
+	local option
+	echo -n "Continue? y/n " >&2
+	read -sn1 option
+	echo >&2
+	if [ "$option" == "y" ] || [ "$option" == "Y" ]; then
+		return 0
+	else
+		exiterr "Aborted by user."
+	fi
+}
+
+action_functions=true
+
+# vim: ts=2 syntax=sh

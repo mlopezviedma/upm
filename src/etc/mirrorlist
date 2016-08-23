@@ -1,0 +1,12 @@
+# upmdb mirrorlist
+# Mirrors are defined as: <NAME> <URL>
+# NAME may be defined locally and is not subject to any restriction,
+# other than not containing whitespaces.
+# <URL> may start with 'http:', which indicates it is a remote location,
+# or with '/' in which case it is treated as a local file.
+
+# Example remote repository
+#repo-name http://some.place.com/path/to/dir
+
+# Example local repository
+troya /var/lib/upm/repos/local

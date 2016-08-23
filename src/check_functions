@@ -1,0 +1,45 @@
+# User Package Manager check functions
+
+[ -n "$check_functions" ] && return 0
+
+source $PREFIX/lib/upm/message_functions
+source $PREFIX/lib/upm/query_functions
+
+function is_package_user () {
+	local grp
+	for grp in $(id -Gn $1 2>/dev/null); do
+		case $grp in install) return 0;; esac
+	done
+	return 1
+}
+
+function is_package_category () {
+	get_categories | sed -e 's/ /\n/g' | grep "^${1}$" &>/dev/null && \
+		return 0 || return 1
+}
+
+function checkroot () {
+	[ $UID == 0 ] || exiterr "Only root can perform this operation."
+	return 0
+}
+
+function checkpkguser () {
+	[ "$1" == --skip ] && local skip=1 && shift || local skip=
+	is_package_user $1 && return 0
+	[ -z "$1" ] && exiterr "You are not a package user!"
+	[ -z "$skip" ] && exiterr "$1 is not a valid package user." || \
+		warning "$1 is not a valid package user. Skipping."
+	return 1
+}
+
+function is_package_in_category () {
+	local grp
+	for grp in $(id -Gn $1 2>/dev/null); do
+		[ "$grp" == "$2" ] && return 0
+	done
+	return 1
+}
+
+check_functions=true
+
+# vim: ts=2 syntax=sh

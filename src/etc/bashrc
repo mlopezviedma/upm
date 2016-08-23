@@ -1,0 +1,40 @@
+#!/bin/bash
+
+if [ -a /tools ]; then
+	export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/tools/bin:/tools/sbin
+else
+	export PATH=/bin:/usr/bin:/sbin:/usr/sbin
+fi
+
+[ $(whoami) == filesystem ] && COLOR=31 || COLOR=33
+export PS1="\[\e[$COLOR;1m\]package \u \[\e[37;1m\]\w \[\e[$COLOR;1m\]>\[\e[0m\] "
+export HISTCONTROL=ignoreboth
+
+# Set LS_COLOR variable if dircolors exists.
+if [ -x /usr/bin/dircolors ]; then
+    eval "`dircolors -b`"
+    export LS_COLORS
+fi
+
+# Control whether the package has been installed on the system or not.
+alias quit='builtin exit 1'
+alias exit='builtin exit 0'
+
+# Some aliases
+alias ls='ls --color'
+alias ll='ls -l'
+alias la='ls -A'
+alias lu='ls -lo'
+alias which='type -P'
+
+# Auto complete usernames for commands "su", "finger", "pinky" and "upm".
+complete -o default -A user su finger pinky upm
+
+# System  variables
+#export XORG_PREFIX=/usr/X11
+#export XORG_CONFIG="--prefix=$XORG_PREFIX --sysconfdir=/etc \
+#--mandir=$XORG_PREFIX/share/man --localstatedir=/var \
+#PKG_CONFIG_PATH=/usr/X11/lib/pkgconfig"
+
+# Go to the home directory whenever we switch to a package user.
+cd

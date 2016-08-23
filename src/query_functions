@@ -1,0 +1,356 @@
+# User Package Manager query functions
+
+[ -n "$query_functions" ] && return 0
+
+PREFIX=${PREFIX:-/usr}
+HOMEDIR=${HOMEDIR:-/var/pkg}
+LIBEXECDIR=${LIBEXECDIR:-$PREFIX/libexec/upm}
+SYSCONFIGDIR=${SYSCONFIGDIR:-/etc}
+GROUPSCHEME=${GROUPSCHEME:-install}
+installdirs="${installdirs:-/boot /etc /opt /usr}"
+
+source $PREFIX/lib/upm/message_functions
+source $PREFIX/lib/upm/check_functions
+
+function get_installed_packages () {
+	find $HOMEDIR -mindepth 1 -maxdepth 1 -perm /u+s -printf "%u\n"
+}
+
+function get_not_installed_packages () {
+	find $HOMEDIR -mindepth 1 -maxdepth 1 ! -perm /u+s -printf "%u\n"
+}
+
+function get_all_packages () {
+	find $HOMEDIR -mindepth 1 -maxdepth 1 -printf "%u\n"
+}
+
+function get_categories () {
+	local pkg
+	for pkg in $(get_all_packages); do
+		id -Gn $pkg 2>/dev/null | sed -e 's/ /\n/g' | grep -v "^${pkg}$"
+	done | sort | uniq | grep -v '^install$'
+}
+
+function get_installed_packages_in_category () {
+	local pkg
+	for pkg in $(get_installed_packages); do
+		id -Gn $pkg 2>/dev/null | sed -e 's/ /\n/g' | grep "^${1}$" &>/dev/null && echo $pkg
+	done
+}
+
+function get_not_installed_packages_in_category () {
+	local pkg
+	for pkg in $(get_not_installed_packages); do
+		id -Gn $pkg 2>/dev/null | sed -e 's/ /\n/g' | grep "^${1}$" &>/dev/null && echo $pkg
+	done
+}
+
+function get_all_packages_in_category () {
+	local pkg
+	for pkg in $(get_all_packages); do
+		id -Gn $pkg 2>/dev/null | sed -e 's/ /\n/g' | grep "^${1}$" &>/dev/null && echo $pkg
+	done
+}
+
+function get_package_categories () {
+	id -Gn $1 2>/dev/null | sed -e 's/ /\n/g' | grep -v "^${1}$" | grep -v "^install$"
+}
+
+function get_files_from () {
+	local dir
+	for dir in $installdirs; do
+		find $dir -user $1 -print 2>/dev/null
+	done | sort
+}
+
+function get_special_files () {
+	local dir file
+	for dir in $installdirs; do
+		for file in $(find $dir -type l); do
+			case $(readlink $file) in $LIBEXECDIR/*) echo $file;; esac
+		done
+	done
+}
+
+function get_empty_install_dirs () {
+	local dir
+	for dir in $installdirs; do
+		find $dir -type d -group install -empty -printf "%p\n" 2>/dev/null
+	done | sort
+}
+
+function query_out () {
+	local found
+	while read; do
+		[ -z "$1" ] && echo $REPLY
+		found=true
+	done
+	[ -n "$found" ] && return 0 || return 2
+}
+
+# Return values:
+# 0: Success. At least one item was found matching every condition imposed.
+# 1: Failed. Invalid sintax.
+# 2: Success. No item was found matching every condition imposed.
+function query_request () {
+	local categories cat packages pkg pkgcmd files
+	local last regexp invert x i findopt quiet
+	local categories_m packages_m files_m
+	local categories_r packages_r files_r
+	findopt="-regextype posix-egrep"
+	last=
+	while [ -n "$1" ]; do # Parse command line options
+		case $1 in
+			--*) # Long options
+				case ${1:2} in
+					categories)
+						[ -z "$categories" ] || \
+							exiterr "Only one categories query may be requested."
+						last=${1:2}
+						categories=c
+						regexp=;;
+					query-installed)
+						[ -z "$packages" ] || \
+							exiterr "Only one packages query may be requested."
+						last=${1:2}
+						packages=p
+						regexp=;;
+					query-not-installed|query-all)
+						[ -z "$packages" ] || \
+							exiterr "Only one packages query may be requested."
+						last=${1:2}
+						packages=${1:8:1}
+						regexp=;;
+					files|uid|gid|special|suspicious|empty-dirs)
+						[ -z "$files" ] || \
+							exiterr "Only one files query may be requested."
+						last=${1:2}
+						files=${1:2:1}
+						regexp=true;;
+					info)
+						[ -n "$last" ] && \
+							exiterr "--info may not be combined with any other query command."
+						last=i
+						packages=i
+						regexp=;;
+					disk-usage)
+						[ -n "$last" ] && \
+							exiterr "--disk-usage may not be combined with any other query command."
+						last=k
+						packages=k
+						regexp=;;
+					invert-match) invert=true;;
+					matching) regexp=;;
+					regexp) regexp=true;;
+					only-regular-files|exclude-regular-files|only-directories|\
+					exclude-directories|only-symlinks|exclude-symlinks)
+						case $last in
+							files|uid|gid|special|suspicious|empty-dirs|f|u|g|s|e);;
+							*) exiterr "$1 may be only within a files query."
+						esac
+						case ${1:2} in
+							only-regular-files) findopt="$findopt -type f";;
+							exclude-regular-files) findopt="$findopt ! -type f";;
+							only-directories) findopt="$findopt -type d";;
+							exclude-directories) findopt="$findopt ! -type d";;
+							only-symlinks) findopt="$findopt -type l";;
+							exclude-symlinks) findopt="$findopt ! -type l";;
+						esac;;
+					quiet) quiet=true;;
+					*) error_no_option $1;;
+				esac;;
+			-*) # Short options
+				for i in $(seq 2 ${#1}); do
+					case ${1:i-1:1} in
+						c)
+							[ -z "$categories" ] || \
+								exiterr "Only one categories query may be requested."
+							last=${1:i-1:1}
+							categories=${1:i-1:1}
+							regexp=;;
+						p|n|a)
+							[ -z "$packages" ] || \
+								exiterr "Only one packages query may be requested."
+							last=${1:i-1:1}
+							packages=${1:i-1:1}
+							regexp=;;
+						f|u|g|s|e)
+							[ -z "$files" ] || \
+								exiterr "Only one files query may be requested."
+							last=${1:i-1:1}
+							files=${1:i-1:1}
+							regexp=true;;
+						i)
+							[ -n "$last" ] && \
+								exiterr "-i may not be combined with any other query command."
+							last=i
+							packages=i
+							regexp=;;
+						k)
+							[ -n "$last" ] && \
+								exiterr "-k may not be combined with any other query command."
+							last=k
+							packages=k
+							regexp=;;
+						v) invert=true;;
+						m) regexp=;;
+						E) regexp=true;;
+						r|R|d|D|l|L)
+							case $last in
+								files|uid|gid|special|suspicious|empty-dirs|f|u|g|s|e);;
+								*) exiterr "$1 may be only within a files query."
+							esac
+							case ${1:i-1:1} in
+								r) findopt="$findopt -type f";;
+								R) findopt="$findopt ! -type f";;
+								d) findopt="$findopt -type d";;
+								D) findopt="$findopt ! -type d";;
+								l) findopt="$findopt -type l";;
+								L) findopt="$findopt ! -type l";;
+							esac;;
+						q) quiet=true;;
+						*) error_no_option "-${1:i-1:1}";;
+					esac
+				done;;
+			*) # Argument given
+				x=$1
+				[ -n "$invert" ] && x="!$x"
+				case $last in
+					categories|c) [ -z "$regexp" ] && \
+						categories_m="$categories_m $x" || \
+						categories_r="$categories_r $x";;
+					query-installed|query-not-installed|query-all|info|disk-usage|p|n|a|i|k)
+						[ -z "$regexp" ] && packages_m="$packages_m $x" || \
+							packages_r="$packages_r $x";;
+					files|uid|gid|special|suspicious|empty-dirs|f|u|g|s|e)
+						[ -z "$regexp" ] && files_m="$files_m $x" || \
+							files_r="$files_r $x";;
+				esac
+				invert=;;
+		esac
+		shift
+	done
+	if [ -n "$categories" ]; then
+		categories=
+		if [ -n "$categories_m" ]; then
+			for x in $(get_categories); do
+				invert=true
+				for i in $categories_m; do
+					[ "${i:0:1}" != "!" ] && invert= && [ "$x" == "$i" ] && cat="$cat $x"
+				done
+			done
+			[ -n "$invert" ] && cat=$(get_categories)
+			for x in $cat; do
+				invert=
+				for i in $categories_m; do
+					[ "${i:0:1}" == "!" ] && [ "${i:1}" == "$x" ] && invert=true
+				done
+				[ -z "$invert" ] && categories="$categories $x"
+			done
+			cat="$categories"
+		else cat=$(get_categories)
+		fi
+		for i in $categories_r; do
+			[ "${i:0:1}" == "!" ] && i="--invert-match ${i:1}"
+			cat=$(echo $cat | sed -e 's/ /\n/g' | grep $i)
+		done
+		categories=true
+	fi
+	if [ -n "$packages" ]; then
+		[ "$packages" == "p" ] && pkgcmd=get_installed_packages
+		[ "$packages" == "n" ] && pkgcmd=get_not_installed_packages
+		[ "$packages" == "a" ] && pkgcmd=get_all_packages
+		[ "$packages" == "i" ] && pkgcmd=get_installed_packages
+		[ "$packages" == "k" ] && pkgcmd=get_installed_packages
+		packages=
+		if [ -n "$packages_m" ]; then
+			for x in $($pkgcmd); do
+				invert=true
+				for i in $packages_m; do
+					[ "${i:0:1}" != "!" ] && invert= && [ "$x" == "$i" ] && pkg="$pkg $x"
+				done
+			done
+			[ -n "$invert" ] && pkg=$($pkgcmd)
+			for x in $pkg; do
+				invert=
+				for i in $packages_m; do
+					[ "${i:0:1}" == "!" ] && [ "${i:1}" == "$x" ] && invert=true
+				done
+				[ -z "$invert" ] && packages="$packages $x"
+			done
+			pkg="$packages"
+		else pkg=$($pkgcmd)
+		fi
+		for i in $packages_r; do
+			[ "${i:0:1}" == "!" ] && i="--invert-match ${i:1}"
+			pkg=$(echo $pkg | sed -e 's/ /\n/g' | grep $i)
+		done
+		packages=true
+	fi
+	if [ -n "$files" ]; then
+		x=
+		[ "$files" == "u" ] && findopt="$findopt -perm /u+s"
+		[ "$files" == "g" ] && findopt="$findopt -perm /g+s"
+		[ "$files" == "e" ] && findopt="$findopt -type d -empty"
+		if [ -n "$files_m" ]; then
+			for i in $files_m; do
+				[ "${i:0:1}" != "!" ] && findopt="$findopt -path $i"
+				[ "${i:0:1}" == "!" ] && findopt="$findopt ! -path ${i:1}"
+			done
+		fi
+		for i in $files_r; do
+			[ "${i:0:1}" != "!" ] && findopt="$findopt -regex $i"
+			[ "${i:0:1}" == "!" ] && findopt="$findopt ! -regex $i"
+		done
+	fi
+	[ "$last" == "i" ] && for i in $pkg; do
+		pinky -lbp $i | sed -e '1s/^Login name:/Package Name:/' \
+			-e '1s/In real life:/\nPackage Description:/' -e '2s/^Project: //' | \
+			grep -v "^#"
+		echo "Categories: $(echo $(get_package_categories $i))"
+		echo -n "Total Disk Usage: "
+		du -hc $(get_files_from $i) | tail -n1 | sed 's/total//'
+	done && return 0
+	[ "$last" == "k" ] && for i in $pkg; do
+		echo -n "$i "
+		du -hc $(get_files_from $i) | tail -n1 | sed 's/total//'
+	done | sort && return 0
+	[ -z "$categories" ] && categories=install || categories=$cat
+	for cat in $categories; do
+		[ -z "$packages" ] && [ -z "$files" ] && echo $cat && continue
+		packages_m=
+		[ -z "$packages" ] && packages_m=$(get_all_packages_in_category $cat) || \
+			for i in $pkg; do
+				is_package_in_category $i $cat && packages_m="$packages_m $i"
+			done
+		[ -z "$packages_m" ] && continue
+		[ -z "$files" ] && for i in $packages_m; do
+			[ "$cat" == install ] && echo $i || echo "$cat $i"
+		done && continue
+		packages_r=
+		for i in $packages_m; do
+			packages_r="$packages_r -or -user $i "
+		done
+		packages_r="${packages_r:4}"
+		[ "$cat" == install ] && cat= || cat="$cat "
+		case $files in
+			s)
+				[ -z "$packages" ] && for i in $(get_special_files 2>/dev/null); do
+					find $i $findopt \( $packages_r \) -printf "$cat%p\n" 2>/dev/null
+				done || for i in $(get_special_files 2>/dev/null); do
+					find $i $findopt \( $packages_r \) -printf "$cat%u %p\n" 2>/dev/null
+				done;;
+			*)
+				[ -z "$packages" ] && for i in $installdirs; do
+					find $i $findopt \( $packages_r \) -printf "$cat%p\n" 2>/dev/null
+				done || for i in $installdirs; do
+					find $i $findopt \( $packages_r \) -printf "$cat%u %p\n" 2>/dev/null
+				done;;
+		esac
+	done | sort | query_out $quiet
+	return $?
+}
+
+query_functions=true
+
+# vim: ts=2 syntax=sh

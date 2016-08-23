@@ -1,0 +1,3 @@
+# upm sources this file as root right after fixing a special file.
+# $1 expands to the complete path of the corresponding file.
+

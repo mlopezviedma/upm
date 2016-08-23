@@ -1,0 +1,201 @@
+#!/bin/bash
+
+source /etc/upm/upm.conf
+source /usr/lib/upm/upmdb_functions
+
+[ $1 ] || exit_usage
+
+while true
+do
+	case $1 in
+		-D|--download)
+			action=download
+			shift
+		;;
+		-S|--sync)
+			action=sync
+			shift
+		;;
+		-I|--install)
+			action=install
+			shift
+		;;
+		-U|--updatedb)
+			action=updatedb
+			shift
+		;;
+		-m|--makepkg)
+			action=makepkg
+			shift
+		;;
+		-M|--makebasepkg)
+			action=makebasepkg
+			shift
+		;;
+		-s|--script)
+			action=script
+			script="$2"
+			shift 2
+		;;
+		-Q|-Ql|--query-packages)
+			action=query-packages
+			shift
+		;;
+		-Qm|--query-mirrors)
+			action=query-mirrors
+			shift
+		;;
+		-Qlm|-Qml|--query-packages-in-mirror)
+			action=query-packages-in-mirror
+			shift
+		;;
+		-Qi|--info)
+			action=info
+			shift
+		;;
+		-Qii|--inspect)
+			action=inspect
+			shift
+		;;
+		-h|--help)
+			show_help
+			exit 0
+		;;
+		*)
+			break
+		;;
+	esac
+done
+
+case $action in
+	# Do all necessary checks according to the chosen action
+	sync|updatedb)
+		checkroot || exit_noroot
+	;;&
+	script)
+		checkroot && exit_root
+		[ -f "$script" ] || exit_notfound "$script"
+		script_path="$(realpath $script)"
+	;;&
+	make*pkg)
+		checkup || exit_noup
+	;;&
+	download|sync|install|makebasepkg|script|info|inspect)
+		[ $1 ] || exit_noargs
+	;;&
+	makepkg)
+		[ $2 ] || exit_noargs
+	;;&
+	download|sync|install|script|info)
+		targets=
+		while [ $1 ]
+		do
+			case $1 in
+				*.pkg.tar.*)
+					[ -f $1 ] || exit_notfound $1
+					targets="$targets $(realpath $1)"
+				;;
+				*)
+					is_pkg_in_mirrors $1 || exit_notfound "package $1"
+					targets="$targets $1"
+				;;
+			esac
+			shift
+		done
+	;;&
+	inspect)
+		targets=
+		case $1 in
+			*.pkg.tar.*)
+				[ -f $1 ] || exit_notfound $1
+				targets="$(realpath $1)"
+			;;
+			*)
+				is_pkg_in_mirrors $1 || exit_notfound "package $1"
+				targets="$1"
+			;;
+		esac
+		shift
+		target_files="$@"
+	;;&
+	
+	# Actions
+	updatedb)
+		msg "Updating package database"
+		enter_clean_workdir -
+		update_package_database
+	;;
+	download)
+		for target in $targets
+		do
+			msg "Retrieving $target"
+			retrieve_package $target
+		done
+	;;
+	sync|install)
+		for target in $targets
+		do
+			msg "Syncing $target"
+			enter_clean_workdir $target
+			msg "Inspecting package"
+			show_package_info
+			show_package_contents
+			ask_for_edit_pkginfo
+			sync_package
+			case $action in
+			install)
+				msg "Installing $target"
+				install_package
+			;;
+			*)
+				msg "All done; run upm $PKGNAME to inspect the package."
+			;;
+			esac
+		done
+	;;
+	script)
+		for target in $targets
+		do
+			msg "Running script for $target"
+			enter_clean_workdir $target
+			case $target in
+			*.pkg.tar.gz)
+				_pkgfile=$(basename $target)
+				PKGID=${_pkgfile/.pkg.tar.gz/}
+			;;
+			*)
+				PKGID=$target
+			;;
+			esac
+			. $script_path
+		done
+	;;
+	info|inspect)
+		for target in $targets
+		do
+			enter_clean_workdir $target
+			show_package_info
+			show_package_contents
+			case $action in inspect) inspect_package;; esac
+		done
+	;;
+	query-packages)
+		query_packages $@
+	;;
+	query-mirrors)
+		query_mirrors $@
+	;;
+	query-packages-in-mirror)
+		query_packages_in_mirror $@
+	;;
+	make*pkg)
+		msg "Creating package"
+		name=$1
+		add=""
+		shift
+		case $action in makebasepkg) add="-a .project .plan build.conf";; esac
+		make_package $name $add $@
+	;;
+esac
+
+clean_exit

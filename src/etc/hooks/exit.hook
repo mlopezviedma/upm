@@ -1,0 +1,16 @@
+# upm sources this file as root every time a package user ends an upm session
+# through the exit command. $1 expands to the name of the package.
+
+source /etc/upm/upm.conf
+chmod u+s $HOMEDIR/$1
+
+# If during the install_commands() stage a .upmfixes file was created, source
+# it as root so to automate fixes and other root tasks.
+# The file is deleted if it is sourced successfully.
+if [ -f $HOMEDIR/$1/.upmfixes ]
+then
+	echo " >> Sourcing .upmfixes file..."
+	. $HOMEDIR/$1/.upmfixes &&
+		rm -v $HOMEDIR/$1/.upmfixes ||
+		echo " !! Errors occurred; check $HOMEDIR/$1/.upmfixes file."
+fi

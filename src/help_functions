@@ -1,0 +1,31 @@
+# User Package Manager help functions
+
+[ -n "$help_functions" ] && return 0
+
+PREFIX=${PREFIX:-/usr}
+
+help_commands () {
+	echo COMMANDS
+	zcat $PREFIX/share/man/man1/upm.1.gz | \
+		sed -n '/^.SH COMMANDS/,$p' | tac | sed -n '/^.SS QUERY/,$p' | tac | \
+		grep -v "^$" | grep -v "^.TP$" | grep -v "^.RE$" | grep -v "^\.S" | \
+		sed -e 's/\\f.//g' -e 's/\\//g' -e '/^-/!s/^/  /' -e 's/^/  /'
+}
+
+help_query () {
+	echo QUERY COMMANDS
+	zcat $PREFIX/share/man/man1/upm.1.gz | \
+		sed -n '/^.SS QUERY/,$p' | tac | sed -n '/^.SH HOOKS/,$p' | tac | \
+		grep -v "^$" | grep -v "^.TP$" | grep -v "^.RE$" | grep -v "^\.S" | \
+		sed -e 's/\\f.//g' -e 's/\\//g' -e '/^-/!s/^/  /' -e 's/^/  /'
+}
+
+usage () {
+	zcat $PREFIX/share/man/man1/upm.1.gz | sed -n '/^.SH SYNOPSIS/,$p' | tac | \
+		sed -n '/^.SH DESCRIPTION/,$p' | tac | grep -v "^.SH" | \
+		sed -e 's/\\f.//g' -e 's/.B //g' -e 's/^.br$//g' | grep -v "^$"
+}
+
+help_functions=true
+
+# vim: ts=2 syntax=sh

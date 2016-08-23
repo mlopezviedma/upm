@@ -1,0 +1,19 @@
+# User Package Manager message functions
+
+[ -n "$messages_functions" ] && return 0
+
+function exiterr () {
+	echo "upm: $1" >&2
+	exit 1
+}
+
+function warning () {
+	echo "upm: Warning: $1" >&2
+}
+
+function error_one_action () { exiterr "Only one action is admitted."; }
+function error_no_option () { exiterr "Option not recognized: $1"; }
+
+messages_functions=true
+
+# vim: ts=2 syntax=sh

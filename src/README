@@ -1,0 +1,29 @@
+    User Package Manager install notes
+    ==================================
+
+Three group schemes are implemented:
+group-equals-category: Every package user has a category as primary group
+                       and "install" as supplementary group.
+group-equals-install: Every package user has "install" as primary group and
+                      categories as supplementary groups.
+group-equals-packagename: Every package user has its name as primary group
+                       and "install" as supplementary group.
+In all cases, multiple supplementary groups can work as multiple categories
+and install directories are owned by package:install. That way each package
+can be the administrator of its own directories.
+
+To install the package, type
+  make VAR1=value VAR2=value ... install
+The following variables are interpreted:
+PREFIX: Directory where to find bin/, lib/ and share/ directories. [/usr]
+HOMEDIR: User Packages home directories location. [/var/pkg]
+LIBEXECDIR: Location for special binaries (set UID and GID).
+            [/usr/libexec/upm]
+GROUPSCHEME: One of the group schemes explained above (category, install or
+             packagename). [install]
+INSTALLDIRSADMIN: If you prefer a certain user to be the administrator (i.e.
+                  owner) for all install directories, set this variable as the
+                  corresponding username. If empty, each package user retains
+                  the ownership of all the directories installed by it. []
+Once the package is installed, these variables can be modified editing the
+/etc/upm/upm.conf file.

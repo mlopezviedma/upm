@@ -1,0 +1,150 @@
+#!/bin/bash
+# User Package Manager main script
+
+version=1.0
+author="Mariano Lopez Minnucci <mlopezviedma@gmail.com>"
+source /etc/upm/upm.conf
+hooksdir=/etc/upm/hooks
+[ -f /etc/upm/installdirs.lst ] && \
+	installdirs="$(cat /etc/upm/installdirs.lst)" || \
+	installdirs="/boot /etc /opt /usr"
+
+source $PREFIX/lib/upm/message_functions
+source $PREFIX/lib/upm/check_functions
+source $PREFIX/lib/upm/action_functions
+source $PREFIX/lib/upm/query_functions
+source $PREFIX/lib/upm/help_functions
+
+print_usage () {
+	[ -f $PREFIX/share/man/man1/upm.1.gz ] || \
+		exiterr "I can't find my man page! =("
+	usage
+}
+
+print_help () {
+	[ -f $PREFIX/share/man/man1/upm.1.gz ] || \
+		exiterr "I can't find my man page! =("
+	echo User Package Manager
+	usage && echo && help_commands
+	echo Type upm --help-query to see a help for query commands.
+}
+
+print_help_query () {
+	[ -f $PREFIX/share/man/man1/upm.1.gz ] || \
+		exiterr "I can't find my man page! =("
+	echo User Package Manager
+	usage && echo && help_query
+}
+
+print_help_all () {
+	[ -f $PREFIX/share/man/man1/upm.1.gz ] || \
+		exiterr "I can't find my man page! =("
+	echo User Package Manager
+	usage && echo && help_commands && echo && help_query
+}
+
+action=
+while [ -n "$1" ]; do # Parse command line options
+	case $1 in
+		--) # No more arguments are read as options
+			shift
+			[ -z "$action" ] && action=login
+			break;;
+		--*) # Long options
+			case ${1:2} in
+				usage)              [ -z "$action" ] && action=usage || error_one_action;;
+				help)               [ -z "$action" ] && action=help || error_one_action;;
+				help-query)         [ -z "$action" ] && action=help-query || error_one_action;;
+				help-all)           [ -z "$action" ] && action=help-all || error_one_action;;
+				version)            [ -z "$action" ] && action=version || error_one_action;;
+				new)                [ -z "$action" ] && action=new || error_one_action;;
+				create)             [ -z "$action" ] && action=create || error_one_action;;
+				add-category)       [ -z "$action" ] && action=add || error_one_action;;
+				fix)                [ -z "$action" ] && action=fix || error_one_action;;
+				pack)               [ -z "$action" ] && action=pack || error_one_action;;
+				install)            [ -z "$action" ] && action=install || error_one_action;;
+				generate-uninstall) [ -z "$action" ] && action=uninstall || error_one_action;;
+				make-install-dirs)  [ -z "$action" ] && action=make || error_one_action;;
+				refresh-dirs)       [ -z "$action" ] && action=refresh || error_one_action;;
+				log)                [ -z "$action" ] && action=log || error_one_action;;
+				*)                  [ -z "$action" ] && action=query && break 2 || error_one_action;;
+			esac;;
+		-*) # Short options
+			for i in $(seq 2 ${#1}); do
+				case ${1:i-1:1} in
+					h) [ -z "$action" ] && action=help || error_one_action;;
+					N) [ -z "$action" ] && action=new || error_one_action;;
+					C) [ -z "$action" ] && action=create || error_one_action;;
+					A) [ -z "$action" ] && action=add || error_one_action;;
+					F) [ -z "$action" ] && action=fix || error_one_action;;
+					P) [ -z "$action" ] && action=pack || error_one_action;;
+					I) [ -z "$action" ] && action=install || error_one_action;;
+					U) [ -z "$action" ] && action=uninstall || error_one_action;;
+					M) [ -z "$action" ] && action=make || error_one_action;;
+					*) [ -z "$action" ] && action=query && break 2 || error_one_action;;
+				esac
+			done;;
+		*) # No more options are given
+			[ -z "$action" ] && action=login
+			break;;
+	esac
+	shift
+done
+
+case $action in
+	""|usage) print_usage;;
+	help) print_help;;
+	help-query) print_help_query;;
+	help-all) print_help_all;;
+	version) echo -e "UPM version ${version}\nWritten by ${author}";;
+	new|create) checkroot
+		[ $# == 0 ] && exiterr "A name for the package must be specified."
+		if [ -n "$(grep ^$1: /etc/passwd)" ]; then
+			checkpkguser $1 && case $action in
+					new)
+						warning "Package user $1 already exists. Switching user anyway..."
+						$0 $1;;
+					*) warning "Package user $1 already exists.";;
+				esac || exiterr "User $1 already exists and it's not a package!"
+		else
+			[ $# == 1 ] && exiterr "A package category must be specified."
+			[ $# == 2 ] && warning "A description for the package is also recomended."
+			[ $# != 2 ] && [ $# != 3 ] && exiterr "Too many arguments."
+			create_package_user $1 $2 "$3"
+			[ -f $hooksdir/create.hook ] && source $hooksdir/create.hook $1
+			case $action in
+				new) $0 $1;;
+				*) echo "Package User created successfully!";;
+			esac
+		fi;;
+	add) add_package_to_category $@;; 
+	fix) fix_special_files $@;;
+	pack) generate_package $@;;
+	install) install_package;;
+	uninstall) generate_uninstall_script;;
+	make) make_install_dirs $@ | logcmd;;
+	refresh) refresh_install_dirs | logcmd;;
+	log) log_request $@;;
+	query) query_request $@
+		exit $?;;
+	login)
+		checkpkguser $1
+		cmd=
+		pkg=$1
+		shift
+		[ $# != 0 ] && cmd=$@
+		[ -f $hooksdir/login.hook ] && source $hooksdir/login.hook $pkg
+		if [ -z "$cmd" ]; then
+			su - $pkg && \
+			{ [ -f $hooksdir/exit.hook ] && source $hooksdir/exit.hook $pkg ; } || \
+			{ [ -f $hooksdir/quit.hook ] && source $hooksdir/quit.hook $pkg ; }
+		else 
+			su - $pkg -c "$cmd" && \
+			{ [ -f $hooksdir/exit.hook ] && source $hooksdir/exit.hook $pkg ; } || \
+			{ [ -f $hooksdir/quit.hook ] && source $hooksdir/quit.hook $pkg ; }
+		fi;;
+esac
+
+exit 0
+
+# vim: ts=2 syntax=sh
